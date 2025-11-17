@@ -26,7 +26,7 @@ app.add_middleware(
 MODEL_PATH = "VGG16_mammogram_model.h5"
 IMG_SIZE = (150, 150)
 ALPHA = 0.4
-SMOOTH_SAMPLES = 10
+SMOOTH_SAMPLES = 3  # Reduced from 10 for faster processing
 SMOOTH_NOISE = 0.03
 THRESHOLD = 0.38
 MIN_AREA = 300
@@ -39,7 +39,7 @@ conv_layer_name = None
 async def load_model_on_startup():
     global model, conv_layer_name
     print(f"Loading model from: {MODEL_PATH}")
-    model = load_model(MODEL_PATH)
+    model = load_model(MODEL_PATH, compile=False)  # Skip compilation for faster loading
     print("Model loaded successfully")
     
     # Find best conv layer
@@ -50,6 +50,11 @@ async def load_model_on_startup():
     # Use last conv layer by default
     conv_layer_name = conv_candidates[-1]
     print(f"Using conv layer: {conv_layer_name}")
+    
+    # Warm up the model with a dummy prediction
+    dummy_input = np.random.rand(1, *IMG_SIZE, 3).astype('float32')
+    _ = model.predict(dummy_input, verbose=0)
+    print("Model warmed up and ready")
 
 @app.get("/")
 async def root():
@@ -166,16 +171,36 @@ def postprocess_heatmap_to_mask(heatmap, orig_shape, thr=THRESHOLD, min_area=MIN
 
 @app.post("/analyze")
 async def analyze_mammogram(file: UploadFile = File(...)):
+    import time
+    start_time = time.time()
+    
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
+    # Validate file is provided
+    if not file:
+        raise HTTPException(status_code=422, detail="No file provided. Please upload an image file.")
+    
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith('image/'):
+        raise HTTPException(
+            status_code=422, 
+            detail=f"Invalid file type: {file.content_type}. Please upload an image file (PNG, JPG, etc.)"
+        )
+    
     try:
         # Read image
+        print(f"[{file.filename}] Starting analysis...")
         image_bytes = await file.read()
+        
+        if len(image_bytes) == 0:
+            raise HTTPException(status_code=422, detail="Uploaded file is empty")
+        
+        print(f"[{file.filename}] Image loaded: {len(image_bytes)} bytes")
         
         # Preprocess and predict
         x_batch, orig_arr = preprocess_image(image_bytes)
-        preds = model.predict(x_batch)
+        preds = model.predict(x_batch, verbose=0)  # Disable progress bar
         
         if isinstance(preds, (list, tuple)):
             preds_arr = preds[0].ravel()
@@ -220,16 +245,21 @@ async def analyze_mammogram(file: UploadFile = File(...)):
         _, mask_buffer = cv2.imencode('.png', mask)
         mask_b64 = base64.b64encode(mask_buffer).decode('utf-8')
         
+        elapsed = time.time() - start_time
+        print(f"[{file.filename}] Analysis complete in {elapsed:.2f}s")
+        
         return JSONResponse({
             "predicted_class": pred_class,
             "confidence": confidence,
             "probabilities": preds_arr.tolist(),
             "bbox": {"x": int(x), "y": int(y), "width": int(wbox), "height": int(hbox)},
             "overlay_image": overlay_b64,
-            "mask_image": mask_b64
+            "mask_image": mask_b64,
+            "processing_time": round(elapsed, 2)
         })
     
     except Exception as e:
+        print(f"Error during analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

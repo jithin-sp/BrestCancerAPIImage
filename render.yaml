@@ -3,7 +3,8 @@ services:
     name: mammogram-api
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 120
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
+    healthCheckPath: /health
